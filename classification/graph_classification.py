@@ -1,9 +1,8 @@
 import matplotlib as mpl
 from matplotlib import pyplot as plt
 
-plt.style.use(
-    "https://github.com/dhaitz/matplotlib-stylesheets/raw/master/pacoty.mplstyle"
-)
+# Use a local built-in style so the script also works offline.
+plt.style.use("default")
 plt.rcParams["font.family"] = "monospace"
 plt.rcParams["font.weight"] = "bold"
 plt.rcParams.update({"font.size": 10})

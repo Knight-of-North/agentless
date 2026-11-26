@@ -36,10 +36,7 @@ def _run_reproduction_tests(args):
         # run on original repo to select tests which can reproduce the issue
         ds = load_dataset(args.dataset)
         instance_ids = ds["test"]["instance_id"]
-        patches = [
-            {"instance_id": instance_id, "patch": "", "normalized_patch": ""}
-            for instance_id in instance_ids
-        ]
+        patches = ["" for _ in instance_ids]
 
         evaluation_tests = load_jsonl(args.test_jsonl)
 

@@ -273,7 +273,7 @@ def transfer_arb_locs_to_locs(
     # Fine-grained-only loc: Remove intervals that are supersets of another.
     if fine_grain_only:
         filtered_line_loc = []
-        for st, en in line_loc:
+        for st, en in sorted(line_loc):
             if filtered_line_loc:
                 last_st, last_en = filtered_line_loc[-1]
                 # If the current interval is a more fine-grained loc, remove the superset.
@@ -286,9 +286,10 @@ def transfer_arb_locs_to_locs(
     # TODO: think of strategies to do bunched up lines
     # TODO: e.g., we can have multiple code segments (right now, its just one)
 
-    for file_content in files:
-        if file_content[0] == pred_file:
-            content = file_content[1]
+    content = file_content
+    for candidate_file in files:
+        if candidate_file[0] == pred_file:
+            content = candidate_file[1]
             break
 
     if len(line_loc) == 0:

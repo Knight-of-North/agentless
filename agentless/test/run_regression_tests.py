@@ -181,11 +181,9 @@ def _run_regression(args):
             else args.instance_ids
         )
 
-        # Feed in a list of blank patches
-        patches = [
-            {"instance_id": instance_id, "patch": "", "normalized_patch": ""}
-            for instance_id in instance_ids
-        ]
+        # Feed in a list of blank patches.  run_tests expects strings, not
+        # prediction dictionaries.
+        patches = ["" for _ in instance_ids]
 
         instance_to_plausible = run_tests(
             instance_ids,

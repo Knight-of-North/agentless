@@ -3,7 +3,7 @@ def load_classification_results():
 
     instance_id_to_type = {}
 
-    with open("swebench_lite_classifications.csv", "r") as f:
+    with open("swebench_lite_classifications.csv", "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         # skip first row
         next(reader)

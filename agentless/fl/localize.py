@@ -19,6 +19,19 @@ from agentless.util.utils import load_existing_instance_ids, load_jsonl, setup_l
 MAX_RETRIES = 5
 
 
+def _has_valid_location(candidate_locs, structure):
+    """Accept either a single {file: locs} mapping or a list of samples."""
+    if isinstance(candidate_locs, list):
+        return any(
+            check_contains_valid_loc(sample, structure)
+            for sample in candidate_locs
+            if isinstance(sample, dict) and sample
+        )
+    if isinstance(candidate_locs, dict) and candidate_locs:
+        return check_contains_valid_loc(candidate_locs, structure)
+    return False
+
+
 def localize_irrelevant_instance(
     bug, args, swe_bench_data, existing_instance_ids, write_lock=None
 ):
@@ -75,26 +88,28 @@ def localize_irrelevant_instance(
 
     if write_lock is not None:
         write_lock.acquire()
-    with open(args.output_file, "a") as f:
-        f.write(
-            json.dumps(
-                {
-                    "instance_id": instance_id,
-                    "found_files": found_files,
-                    "additional_artifact_loc_file": additional_artifact_loc_file,
-                    "file_traj": file_traj,
-                    "found_related_locs": found_related_locs,
-                    "additional_artifact_loc_related": additional_artifact_loc_related,
-                    "related_loc_traj": related_loc_traj,
-                    "found_edit_locs": found_edit_locs,
-                    "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
-                    "edit_loc_traj": edit_loc_traj,
-                }
+    try:
+        with open(args.output_file, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "instance_id": instance_id,
+                        "found_files": found_files,
+                        "additional_artifact_loc_file": additional_artifact_loc_file,
+                        "file_traj": file_traj,
+                        "found_related_locs": found_related_locs,
+                        "additional_artifact_loc_related": additional_artifact_loc_related,
+                        "related_loc_traj": related_loc_traj,
+                        "found_edit_locs": found_edit_locs,
+                        "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
+                        "edit_loc_traj": edit_loc_traj,
+                    }
+                )
+                + "\n"
             )
-            + "\n"
-        )
-    if write_lock is not None:
-        write_lock.release()
+    finally:
+        if write_lock is not None:
+            write_lock.release()
 
 
 def localize_instance(
@@ -343,8 +358,8 @@ def localize_instance(
                         additional_artifact_loc_edit_location
                     ]
 
-                    if check_contains_valid_loc(
-                        found_related_locs, structure=structure
+                    if _has_valid_location(
+                        found_edit_locs, structure=structure
                     ):
                         break
 
@@ -373,26 +388,28 @@ def localize_instance(
 
     if write_lock is not None:
         write_lock.acquire()
-    with open(args.output_file, "a") as f:
-        f.write(
-            json.dumps(
-                {
-                    "instance_id": instance_id,
-                    "found_files": found_files,
-                    "additional_artifact_loc_file": additional_artifact_loc_file,
-                    "file_traj": file_traj,
-                    "found_related_locs": found_related_locs,
-                    "additional_artifact_loc_related": additional_artifact_loc_related,
-                    "related_loc_traj": related_loc_trajs,
-                    "found_edit_locs": found_edit_locs,
-                    "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
-                    "edit_loc_traj": edit_loc_traj,
-                }
+    try:
+        with open(args.output_file, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "instance_id": instance_id,
+                        "found_files": found_files,
+                        "additional_artifact_loc_file": additional_artifact_loc_file,
+                        "file_traj": file_traj,
+                        "found_related_locs": found_related_locs,
+                        "additional_artifact_loc_related": additional_artifact_loc_related,
+                        "related_loc_traj": related_loc_trajs,
+                        "found_edit_locs": found_edit_locs,
+                        "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
+                        "edit_loc_traj": edit_loc_traj,
+                    }
+                )
+                + "\n"
             )
-            + "\n"
-        )
-    if write_lock is not None:
-        write_lock.release()
+    finally:
+        if write_lock is not None:
+            write_lock.release()
 
 
 def localize_irrelevant(args):
@@ -494,7 +511,9 @@ def merge(args):
                 )
             merged_locs.append({**locs, "found_edit_locs": merged_found_locs})
         with open(
-            f"{args.output_folder}/loc_merged_{st_id}-{en_id}_outputs.jsonl", "w"
+            f"{args.output_folder}/loc_merged_{st_id}-{en_id}_outputs.jsonl",
+            "w",
+            encoding="utf-8",
         ) as f:
             for data in merged_locs:
                 f.write(json.dumps(data) + "\n")

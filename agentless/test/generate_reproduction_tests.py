@@ -280,16 +280,29 @@ def post_process_tests(args):
     apply some diff formatting.
     """
     raw_outputs = load_jsonl(args.raw_output_file)
-    generation_idx = args.select_id
 
     for raw_output in raw_outputs:
         instance_id = raw_output["instance_id"]
+        raw_output_values = raw_output.get("raw_output", [])
+        if isinstance(raw_output_values, str):
+            raw_output_values = [raw_output_values]
+        generations = raw_output.get("all_generations") or [[]]
+        generation_count = (
+            len(generations[0]) if generations and isinstance(generations[0], list) else 0
+        )
+        if args.select_id == -1:
+            generation_idx = generation_count - 1 if generation_count else 0
+        else:
+            generation_idx = args.select_id
 
         if (
-            raw_output["raw_output"] == ""
-            or not raw_output["all_generations"][0][generation_idx]
+            not raw_output_values
+            or all(not str(value).strip() for value in raw_output_values)
+            or generation_count == 0
+            or generation_idx < 0
+            or generation_idx >= generation_count
         ):
-            with open(args.output_file, "a") as f:
+            with open(args.output_file, "a", encoding="utf-8") as f:
                 f.write(
                     json.dumps(
                         {
@@ -302,20 +315,16 @@ def post_process_tests(args):
                 )
             continue
 
-        if args.select_id == -1:
-            # Use the last generation
-            assert False, "not implemented for now"
+        raw_git_diffs = raw_output["all_generations"][0][generation_idx]
+        extracted_code = extract_first_code_block(
+            raw_output["all_generations"][0][generation_idx]
+        )
+        if extracted_code:
+            git_diffs = create_patch_from_code(extracted_code)
         else:
-            raw_git_diffs = raw_output["all_generations"][0][generation_idx]
-            extracted_code = extract_first_code_block(
-                raw_output["all_generations"][0][generation_idx]
-            )
-            if extracted_code:
-                git_diffs = create_patch_from_code(extracted_code)
-            else:
-                git_diffs = ""
+            git_diffs = ""
 
-        with open(args.output_file, "a") as f:
+        with open(args.output_file, "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(
                     {
@@ -331,6 +340,9 @@ def post_process_tests(args):
 
 
 def normalize_test(test: str):
+    if not test or not str(test).strip():
+        return ""
+
     def normalize_code(code):
         try:
             node = ast.parse(code)

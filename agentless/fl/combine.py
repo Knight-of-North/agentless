@@ -13,34 +13,29 @@ def combine_file_level(args):
     embed_used_locs = load_jsonl(args.retrieval_loc_file)
     model_used_locs = load_jsonl(args.model_loc_file)
 
-    with open(f"{args.output_folder}/embed_used_locs.jsonl", "w") as f:
+    with open(f"{args.output_folder}/embed_used_locs.jsonl", "w", encoding="utf-8") as f:
         for loc in embed_used_locs:
             f.write(json.dumps(loc) + "\n")
 
-    with open(f"{args.output_folder}/model_used_locs.jsonl", "w") as f:
+    with open(f"{args.output_folder}/model_used_locs.jsonl", "w", encoding="utf-8") as f:
         for loc in model_used_locs:
             f.write(json.dumps(loc) + "\n")
 
-    for pred in tqdm(model_used_locs, colour="MAGENTA"):
-        instance_id = pred["instance_id"]
+    embed_by_id = {loc["instance_id"]: loc.get("found_files", []) for loc in embed_used_locs}
 
-        model_loc = pred["found_files"]
-        retrieve_loc = [x for x in embed_used_locs if x["instance_id"] == instance_id][
-            0
-        ]["found_files"]
+    with open(args.output_file, "w", encoding="utf-8") as f:
+        for pred in tqdm(model_used_locs, colour="MAGENTA"):
+            instance_id = pred["instance_id"]
+            model_loc = pred.get("found_files", [])
+            retrieve_loc = embed_by_id.get(instance_id, [])
 
-        combined_loc_counter = Counter()
-        combined_locs = []
+            combined_loc_counter = Counter()
+            for loc in model_loc[: args.top_n]:
+                combined_loc_counter[loc] += 1
+            for loc in retrieve_loc[: args.top_n]:
+                combined_loc_counter[loc] += 1
 
-        for loc in model_loc[: args.top_n]:
-            combined_loc_counter[loc] += 1
-
-        for loc in retrieve_loc[: args.top_n]:
-            combined_loc_counter[loc] += 1
-
-        combined_locs = [loc for loc, _ in combined_loc_counter.most_common()]
-
-        with open(args.output_file, "a") as f:
+            combined_locs = [loc for loc, _ in combined_loc_counter.most_common()]
             f.write(
                 json.dumps(
                     {
@@ -67,12 +62,13 @@ def main():
     args = parser.parse_args()
 
     args.output_file = os.path.join(args.output_folder, args.output_file)
-    assert not os.path.exists(args.output_file), "Output file already exists"
 
     os.makedirs(args.output_folder, exist_ok=True)
 
     # dump argument
-    with open(os.path.join(args.output_folder, "args.json"), "w") as f:
+    with open(
+        os.path.join(args.output_folder, "args.json"), "w", encoding="utf-8"
+    ) as f:
         json.dump(vars(args), f, indent=4)
 
     combine_file_level(args)

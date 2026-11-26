@@ -1,4 +1,5 @@
 import argparse
+import ast
 import concurrent.futures
 import json
 import os
@@ -185,7 +186,15 @@ def _post_process_multifile_repair(
             for c in edit_commands:
                 logger.info(c)
                 logger.info("\n" + "-" * 40)
-            edited_file = eval(edited_file_key)  # convert '"file.py"' to 'file.py'
+            # Model output is untrusted: never eval() it.  The key is
+            # normally a quoted file name such as '"file.py"'.
+            try:
+                edited_file = ast.literal_eval(edited_file_key)
+            except (ValueError, SyntaxError):
+                # Tolerate unquoted file names from malformed model output.
+                edited_file = str(edited_file_key).strip().strip("\"'")
+            if not isinstance(edited_file, str) or not edited_file:
+                raise ValueError(f"invalid edited file key: {edited_file_key!r}")
             content = file_contents[edited_file]
             if diff_format:
                 new_content = parse_diff_edit_commands(
@@ -617,8 +626,30 @@ def post_process_repair(args):
         log_file = os.path.join(args.output_folder, "repair_logs", f"{instance_id}.log")
         logger = setup_logger(log_file)
 
-        if raw_output["raw_output"] == "":
-            with open(args.output_file, "a") as f:
+        raw_output_values = raw_output.get("raw_output", [])
+        if isinstance(raw_output_values, str):
+            # for backward compatibility
+            raw_output_values = [raw_output_values]
+        generations = raw_output.get("all_generations") or [[]]
+        generation_count = (
+            len(generations[0]) if generations and isinstance(generations[0], list) else 0
+        )
+
+        if args.select_id == -1:
+            # Use the last generation.
+            generation_idx = generation_count - 1 if generation_count else 0
+        else:
+            # Use the indexed generation.
+            generation_idx = args.select_id
+
+        if (
+            not raw_output_values
+            or all(not str(value).strip() for value in raw_output_values)
+            or generation_count == 0
+            or generation_idx < 0
+            or generation_idx >= generation_count
+        ):
+            with open(args.output_file, "a", encoding="utf-8") as f:
                 f.write(
                     json.dumps(
                         {
@@ -629,70 +660,57 @@ def post_process_repair(args):
                     )
                     + "\n"
                 )
+            cleanup_logger(logger)
             continue
 
-        if args.select_id == -1:
-            # Use the last generation
-            assert False, "not implemented for now"
-        else:
-            # Use the indexed generation
-            generation_idx = args.select_id
-            try:
-                raw_output_text = raw_output["all_generations"][0][generation_idx]
-                original_file_content = raw_output["prev_content"][0][generation_idx]
-                pred_file = raw_output["file_names"][0][generation_idx]
+        try:
+            raw_output_text = raw_output["all_generations"][0][generation_idx]
+            original_file_content = raw_output["prev_content"][0][generation_idx]
+            pred_file = raw_output["file_names"][0][generation_idx]
 
-                pred_files = [loc for loc in locs if loc["instance_id"] == instance_id][
-                    0
-                ]["found_files"][: args.top_n]
+            pred_files = [loc for loc in locs if loc["instance_id"] == instance_id][
+                0
+            ]["found_files"][: args.top_n]
 
-                git_diffs = ""
-                raw_git_diffs = ""
-                if isinstance(raw_output["raw_output"], str):
-                    # for backward compatibility
-                    raw_output["raw_output"] = [raw_output["raw_output"]]
+            git_diffs = ""
+            raw_git_diffs = ""
 
-                if isinstance(original_file_content, str):
-                    original_file_content = [original_file_content]
-                    pred_file = [pred_file]
+            if isinstance(original_file_content, str):
+                original_file_content = [original_file_content]
+                pred_file = [pred_file]
 
-                file_contents = {
-                    file_name: o_file_content
-                    for file_name, o_file_content in zip(
-                        pred_file, original_file_content
+            file_contents = {
+                file_name: o_file_content
+                for file_name, o_file_content in zip(pred_file, original_file_content)
+            }
+
+            file_loc_intervals = dict()
+
+            loc = [loc for loc in locs if loc["instance_id"] == instance_id][0]
+
+            for i, tmp_pred_file in enumerate(pred_files):
+                if tmp_pred_file not in pred_file:
+                    continue
+                if "found_edit_locs" in loc and tmp_pred_file in loc["found_edit_locs"]:
+                    line_locs, context_intervals = transfer_arb_locs_to_locs(
+                        loc["found_edit_locs"][tmp_pred_file],
+                        None,
+                        loc["found_files"][i],
+                        args.context_window,
+                        args.loc_interval,
+                        args.fine_grain_loc_only,
+                        file_content=file_contents[tmp_pred_file]
+                        if tmp_pred_file in file_contents
+                        else "",
                     )
-                }
+                else:
+                    line_locs, context_intervals = [], []  # default values.
 
-                file_loc_intervals = dict()
-
-                loc = [loc for loc in locs if loc["instance_id"] == instance_id][0]
-
-                for i, tmp_pred_file in enumerate(pred_files):
-                    if tmp_pred_file not in pred_file:
-                        continue
-                    if (
-                        "found_edit_locs" in loc
-                        and tmp_pred_file in loc["found_edit_locs"]
-                    ):
-                        line_locs, context_intervals = transfer_arb_locs_to_locs(
-                            loc["found_edit_locs"][tmp_pred_file],
-                            None,
-                            loc["found_files"][i],
-                            args.context_window,
-                            args.loc_interval,
-                            args.fine_grain_loc_only,
-                            file_content=file_contents[tmp_pred_file]
-                            if tmp_pred_file in file_contents
-                            else "",
-                        )
-                    else:
-                        line_locs, context_intervals = [], []  # default values.
-
-                    file_loc_intervals[tmp_pred_file] = context_intervals
-            except Exception as e:
-                logger.info(e)
-                print(e)
-                raw_output_text = ""
+                file_loc_intervals[tmp_pred_file] = context_intervals
+        except Exception as e:
+            logger.info(e)
+            print(e)
+            raw_output_text = ""
 
         if raw_output_text:
             (

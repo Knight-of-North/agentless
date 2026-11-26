@@ -3,7 +3,7 @@ import argparse
 from agentless.util.utils import load_jsonl
 
 
-def cost(fp):
+def cost(fp, prompt_price_per_million=5.0, completion_price_per_million=15.0):
     def flatten_trajs(record, trajs):
         if isinstance(record, dict):
             trajs.append(record)
@@ -34,14 +34,19 @@ def cost(fp):
 
         total += 1
 
-    cost = sum_prompt * 5 / 1000000 + sum_completion * 15 / 1000000
+    cost = (
+        sum_prompt * prompt_price_per_million / 1000000
+        + sum_completion * completion_price_per_million / 1000000
+    )
     tokens = sum_prompt + sum_completion
+    avg_cost = cost / total if total else 0.0
+    avg_tokens = tokens / total if total else 0.0
 
     print(f"Total cost: {cost = }")
-    print(f"Avg cost: {cost / total}")
+    print(f"Avg cost: {avg_cost}")
 
     print(f"Total tokens: {tokens = }")
-    print(f"Avg tokens: {tokens / total}")
+    print(f"Avg tokens: {avg_tokens}")
 
 
 def embedding_cost(fp):
@@ -55,7 +60,7 @@ def embedding_cost(fp):
         total += 1
 
     print(f"Total cost: {cost = }")
-    print(f"Avg cost: {total}: {cost / total}")
+    print(f"Avg cost: {total}: {cost / total if total else 0.0}")
 
     return cost
 
@@ -64,13 +69,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_file", type=str, required=True)
     parser.add_argument("--embedding_cost", action="store_true")
+    parser.add_argument("--prompt_price_per_million", type=float, default=5.0)
+    parser.add_argument("--completion_price_per_million", type=float, default=15.0)
 
     args = parser.parse_args()
 
     if args.embedding_cost:
         embedding_cost(args.output_file)
     else:
-        cost(args.output_file)
+        cost(
+            args.output_file,
+            prompt_price_per_million=args.prompt_price_per_million,
+            completion_price_per_million=args.completion_price_per_million,
+        )
 
 
 if __name__ == "__main__":

@@ -15,11 +15,11 @@ def _load_results(args):
 
     roots = [Path(folder) for folder in args.patch_folder.split(",")]
 
-    intervals = [(0, int(args.num_samples / len(roots)) - 1) for _ in range(len(roots))]
+    base, remainder = divmod(args.num_samples, len(roots))
 
-    interval = intervals[0]
-    for i in range(interval[0], interval[1] + 1):
-        for _, root in enumerate(roots):
+    for root_index, root in enumerate(roots):
+        count = base + (1 if root_index < remainder else 0)
+        for i in range(count):
             patches = load_jsonl(root / f"output_{i}_normalized.jsonl")
             print(
                 f"Loaded {len(patches)} patches from {root / f'output_{i}_normalized.jsonl'}"
@@ -155,7 +155,7 @@ def modified_length(normalized_patch):
 
 def majority_voting(args):
 
-    with open(args.output_file, "w") as f:
+    with open(args.output_file, "w", encoding="utf-8") as f:
 
         for instance_id in execution_results:
             if len(execution_results[instance_id]) < args.num_samples:
@@ -230,14 +230,17 @@ def majority_voting(args):
                             vote[patch_key] += 1
                             if patch_key not in first_appear_idx:
                                 first_appear_idx[patch_key] = i
-                    maj_selected_id = max(
-                        valid_indices,
-                        key=lambda i: (
-                            vote[patch_keys[i]],
-                            -first_appear_idx[patch_keys[i]],
-                        ),
-                    )
-                    patch = get_sample(instance_id, maj_selected_id)["patch"]
+                    if valid_indices:
+                        maj_selected_id = max(
+                            valid_indices,
+                            key=lambda i: (
+                                vote[patch_keys[i]],
+                                -first_appear_idx[patch_keys[i]],
+                            ),
+                        )
+                        patch = get_sample(instance_id, maj_selected_id)["patch"]
+                    else:
+                        patch = ""
                     result = {
                         "model_name_or_path": "agentless",
                         "instance_id": instance_id,
@@ -292,10 +295,10 @@ def majority_voting(args):
 def normalize_patches(args):
     # separate the patch folders
     output_folders = [Path(folder) for folder in args.patch_folder.split(",")]
-    num_folders = len(output_folders)
-    selected_ids = list(range(int(args.num_samples / num_folders)))
+    base, remainder = divmod(args.num_samples, len(output_folders))
 
-    for output_folder in output_folders:
+    for folder_index, output_folder in enumerate(output_folders):
+        selected_ids = range(base + (1 if folder_index < remainder else 0))
         for i in selected_ids:
             if os.path.exists(output_folder / f"output_{i}_normalized.jsonl"):
                 # skip
@@ -315,7 +318,9 @@ def normalize_patches(args):
                     edited_files,
                 )
                 d["normalized_patch"] = normalized_patch
-            with open(output_folder / f"output_{i}_normalized.jsonl", "w") as f:
+            with open(
+                output_folder / f"output_{i}_normalized.jsonl", "w", encoding="utf-8"
+            ) as f:
                 for d in patches:
                     f.write(json.dumps(d) + "\n")
 

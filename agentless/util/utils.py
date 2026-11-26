@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from collections import defaultdict
 
 
 def load_jsonl(filepath):
@@ -13,8 +14,8 @@ def load_jsonl(filepath):
     Returns:
     A list of dictionaries representing the data in each line of the JSONL file.
     """
-    with open(filepath, "r") as file:
-        return [json.loads(line) for line in file]
+    with open(filepath, "r", encoding="utf-8") as file:
+        return [json.loads(line) for line in file if line.strip()]
 
 
 def write_jsonl(data, filepath):
@@ -25,13 +26,14 @@ def write_jsonl(data, filepath):
     data -- a list of dictionaries to write to the JSONL file
     filepath -- the path to the JSONL file to write
     """
-    with open(filepath, "w") as file:
+    with open(filepath, "w", encoding="utf-8") as file:
         for entry in data:
-            file.write(json.dumps(entry) + "\n")
+            file.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def load_json(filepath):
-    return json.load(open(filepath, "r"))
+    with open(filepath, "r", encoding="utf-8") as file:
+        return json.load(file)
 
 
 def combine_by_instance_id(data):
@@ -63,7 +65,19 @@ def setup_logger(log_file):
     logger = logging.getLogger(log_file)
     logger.setLevel(logging.DEBUG)
 
-    fh = logging.FileHandler(log_file)
+    # Avoid attaching duplicate handlers when a pipeline step reuses a logger.
+    absolute_log_file = os.path.abspath(log_file)
+    if any(
+        isinstance(handler, logging.FileHandler)
+        and os.path.abspath(handler.baseFilename) == absolute_log_file
+        for handler in logger.handlers
+    ):
+        return logger
+
+    log_dir = os.path.dirname(absolute_log_file)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -83,11 +97,11 @@ def cleanup_logger(logger):
 def load_existing_instance_ids(output_file):
     instance_ids = set()
     if os.path.exists(output_file):
-        with open(output_file, "r") as f:
+        with open(output_file, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     data = json.loads(line.strip())
                     instance_ids.add(data["instance_id"])
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, KeyError, TypeError):
                     continue
     return instance_ids

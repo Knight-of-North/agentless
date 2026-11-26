@@ -191,7 +191,11 @@ class EmbeddingIndex(ABC):
         self.instance_id = instance_id
         self.structure = structure
         self.problem_statement = problem_statement
-        self.persist_dir = persist_dir + "/{instance_id}"
+        self.persist_dir = (
+            os.path.join(persist_dir, "{instance_id}")
+            if persist_dir
+            else os.path.join("playground", "embedding_cache", "{instance_id}")
+        )
         self.filter_type = filter_type
         self.index_type = index_type
         self.chunk_size = chunk_size
@@ -219,7 +223,9 @@ class EmbeddingIndex(ABC):
         token_counter = TokenCountingHandler(
             tokenizer=tiktoken.encoding_for_model("text-embedding-3-small").encode
         )
+        Settings.callback_manager = CallbackManager([token_counter])
         if not os.path.exists(persist_dir) or mock:
+            os.makedirs(persist_dir, exist_ok=True)
             files, _, _ = get_full_file_paths_and_classes_and_functions(self.structure)
             filtered_files = self.filter_files(files)
             self.logger.info(f"Total number of considered files: {len(filtered_files)}")
@@ -255,7 +261,6 @@ class EmbeddingIndex(ABC):
                 embed_model = MockEmbedding(
                     embed_dim=1024
                 )  # embedding dimension does not matter for mocking.
-                Settings.callback_manager = CallbackManager([token_counter])
             else:
                 embed_model = OpenAIEmbedding(model_name="text-embedding-3-small")
             index = VectorStoreIndex.from_documents(documents, embed_model=embed_model)
@@ -266,7 +271,8 @@ class EmbeddingIndex(ABC):
 
         self.logger.info(f"Retrieving with query:\n{self.problem_statement}")
 
-        retriever = VectorIndexRetriever(index=index, similarity_top_k=100)
+        top_k = self.kwargs.get("top_n") or self.kwargs.get("filter_top_n") or 100
+        retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
         documents = retriever.retrieve(self.problem_statement)
 
         self.logger.info(

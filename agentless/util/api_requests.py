@@ -1,3 +1,4 @@
+import random
 import time
 from typing import Dict, Union
 
@@ -56,46 +57,43 @@ def handler(signum, frame):
 
 
 def request_chatgpt_engine(config, logger, base_url=None, max_retries=40, timeout=100):
+    """Request an OpenAI-compatible chat completion with bounded retries.
+
+    ``timeout`` is passed to the OpenAI client so a hung request cannot block
+    forever.  Retryable errors use exponential backoff with jitter.
+    Authentication and permission errors are raised immediately.
+    """
     ret = None
-    retries = 0
+    client = openai.OpenAI(base_url=base_url, timeout=timeout)
 
-    client = openai.OpenAI(base_url=base_url)
-
-    while ret is None and retries < max_retries:
+    for retries in range(max_retries):
         try:
-            # Attempt to get the completion
             logger.info("Creating API request")
-
             ret = client.chat.completions.create(**config)
-
+            break
+        except (openai.AuthenticationError, openai.PermissionDeniedError) as e:
+            logger.error("Authentication or permission error: %s", e)
+            raise
+        except openai.BadRequestError as e:
+            logger.error("Invalid API request: %s", e)
+            raise
+        except (openai.RateLimitError, openai.APIConnectionError) as e:
+            delay = min(60.0, 2 ** min(retries, 6)) + random.uniform(0, 1)
+            logger.warning(
+                "Transient OpenAI error (%s); retrying in %.1fs (%d/%d)",
+                type(e).__name__,
+                delay,
+                retries + 1,
+                max_retries,
+            )
+            time.sleep(delay)
         except openai.OpenAIError as e:
-            if isinstance(e, openai.BadRequestError):
-                logger.info("Request invalid")
-                print(e)
-                logger.info(e)
-                raise Exception("Invalid API Request")
-            elif isinstance(e, openai.RateLimitError):
-                print("Rate limit exceeded. Waiting...")
-                logger.info("Rate limit exceeded. Waiting...")
-                print(e)
-                logger.info(e)
-                time.sleep(5)
-            elif isinstance(e, openai.APIConnectionError):
-                print("API connection error. Waiting...")
-                logger.info("API connection error. Waiting...")
-                print(e)
-                logger.info(e)
-                time.sleep(5)
-            else:
-                print("Unknown error. Waiting...")
-                logger.info("Unknown error. Waiting...")
-                print(e)
-                logger.info(e)
-                time.sleep(1)
+            logger.error("Non-retryable OpenAI error: %s", e)
+            raise
 
-        retries += 1
-
-    logger.info(f"API response {ret}")
+    if ret is None:
+        raise RuntimeError(f"OpenAI request failed after {max_retries} attempts")
+    logger.info("API response received")
     return ret
 
 
@@ -134,14 +132,17 @@ def create_anthropic_config(
 def request_anthropic_engine(
     config, logger, max_retries=40, timeout=500, prompt_cache=False
 ):
+    """Request an Anthropic message with a real total timeout and backoff."""
     ret = None
-    retries = 0
+    client = anthropic.Anthropic(timeout=timeout)
+    start_time = time.time()
 
-    client = anthropic.Anthropic()
-
-    while ret is None and retries < max_retries:
+    for retries in range(max_retries):
         try:
-            start_time = time.time()
+            if time.time() - start_time >= timeout:
+                raise TimeoutError(
+                    f"Anthropic request exceeded total timeout of {timeout}s"
+                )
             if prompt_cache:
                 # following best practice to cache mainly the reused content at the beginning
                 # this includes any tools, system messages (which is already handled since we try to cache the first message)
@@ -151,14 +152,26 @@ def request_anthropic_engine(
                 ret = client.beta.prompt_caching.messages.create(**config)
             else:
                 ret = client.messages.create(**config)
+            break
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
+            logger.error("Authentication or permission error: %s", e)
+            raise
         except Exception as e:
-            logger.error("Unknown error. Waiting...", exc_info=True)
-            # Check if the timeout has been exceeded
             if time.time() - start_time >= timeout:
-                logger.warning("Request timed out. Retrying...")
-            else:
-                logger.warning("Retrying after an unknown error...")
-            time.sleep(10 * retries)
-        retries += 1
+                logger.error("Anthropic request timed out after %ss", timeout)
+                raise TimeoutError(
+                    f"Anthropic request exceeded total timeout of {timeout}s"
+                ) from e
+            delay = min(30.0, 2 ** min(retries, 5)) + random.uniform(0, 1)
+            logger.warning(
+                "Anthropic request error (%s); retrying in %.1fs (%d/%d)",
+                type(e).__name__,
+                delay,
+                retries + 1,
+                max_retries,
+            )
+            time.sleep(delay)
 
+    if ret is None:
+        raise RuntimeError(f"Anthropic request failed after {max_retries} attempts")
     return ret

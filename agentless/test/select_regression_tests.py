@@ -60,7 +60,7 @@ def select_test(instance_id, args, swe_bench_data, prev_o, passing_tests):
         return None
 
     if len(passing_tests) == 0:
-        with open(args.output_file, "a") as f:
+        with open(args.output_file, "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(
                     {
@@ -89,6 +89,29 @@ def select_test(instance_id, args, swe_bench_data, prev_o, passing_tests):
 
     logger.info(f"prompting with message:\n{message}")
 
+    if args.mock:
+        with open(args.output_file, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "instance_id": instance_id,
+                        "raw_output": "",
+                        "tests_passing_in_original_repo": passing_tests,
+                        "original_regressions": passing_tests,
+                        "traj": {
+                            "prompt": message,
+                            "usage": {
+                                "prompt_tokens": num_tokens_from_messages(
+                                    message, args.model
+                                )
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+        return
+
     # get greedy sample
     model = make_model(
         model=args.model,
@@ -102,10 +125,9 @@ def select_test(instance_id, args, swe_bench_data, prev_o, passing_tests):
     def message_too_long(message):
         return num_tokens_from_messages(message, args.model) >= MAX_CONTEXT_LENGTH
 
-    while message_too_long(message):
-        # half it
-        # TODO: we can prompt the model multiple times to select from different subset of tests
-        passing_tests = passing_tests[: len(passing_tests) // 2]
+    while message_too_long(message) and len(passing_tests) > 1:
+        # halve it, but never drop to an empty list
+        passing_tests = passing_tests[: max(1, len(passing_tests) // 2)]
         message = prompt_template.format(
             problem_statement=problem_statement, passing_tests="\n".join(passing_tests)
         ).strip()
@@ -123,7 +145,7 @@ def select_test(instance_id, args, swe_bench_data, prev_o, passing_tests):
         if x not in model_identified_tests:
             subset_regression_tests.append(x)
 
-    with open(args.output_file, "a") as f:
+    with open(args.output_file, "a", encoding="utf-8") as f:
         f.write(
             json.dumps(
                 {

@@ -1,9 +1,11 @@
 import ast
 import os
 import re
+import shutil
 import subprocess
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 
 from get_repo_structure.get_patch_info import parse_patch
 
@@ -49,59 +51,87 @@ def check_code_differ_by_just_empty_lines(codes, prev_codes) -> bool:
     return normalized_code1 == normalized_code2
 
 
-def lint_code(repo_playground, temp_name, code, prev_code="") -> tuple[bool, set, set]:
-
-    # Generate a temperary folder and add uuid to avoid collision
-    repo_playground = os.path.join(repo_playground, str(uuid.uuid4()))
-
-    # assert playground doesn't exist
-    assert not os.path.exists(repo_playground), f"{repo_playground} already exists"
-
-    # create playground
-    os.makedirs(repo_playground)
-
-    with open(f"{repo_playground}/{temp_name}", "w") as f:
-        f.write(prev_code)
-
-    # lint the code
-    # check for fatal errors
+def _run_flake8(file_path: Path):
+    """Return the set of flake8 messages, or None if flake8 is unavailable."""
+    flake8 = shutil.which("flake8")
+    if flake8 is None:
+        return None
     fatal = "E9,F821,F823,F831,F406,F407,F701,F702,F704,F706"
-    o = subprocess.run(
-        f"flake8 --select={fatal} --isolated {repo_playground}/{temp_name}",
-        shell=True,
+    result = subprocess.run(
+        [
+            flake8,
+            f"--select={fatal}",
+            "--isolated",
+            "--format=%(row)d:%(col)d:%(code)s:%(text)s",
+            str(file_path),
+        ],
         capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
-    s = o.stdout.decode("utf-8")
-
-    prev_errors = set()
-    if s != "":
-        for error in s.split(f"{repo_playground}/{temp_name}:")[1:]:
-            num_free_error = ":".join(error.split(":")[2:]).strip()
-            prev_errors.add(num_free_error)
-
-    with open(f"{repo_playground}/{temp_name}", "w") as f:
-        f.write(code)
-
-    o = subprocess.run(
-        f"flake8 --select={fatal} --isolated {repo_playground}/{temp_name}",
-        shell=True,
-        capture_output=True,
-    )
-    s = o.stdout.decode("utf-8")
-
-    # remove playground
-    subprocess.run(f"rm -rf {repo_playground}", shell=True)
-
+    # flake8 exits 1 when it reports violations; anything else is a tool error.
+    if result.returncode not in (0, 1):
+        return None
     errors = set()
-    if s != "":
-        for error in s.split(f"{repo_playground}/{temp_name}:")[1:]:
-            num_free_error = ":".join(error.split(":")[2:]).strip()
-            errors.add(num_free_error)
+    for line in result.stdout.splitlines():
+        parts = line.split(":", 3)
+        if len(parts) == 4 and parts[0].strip().isdigit():
+            errors.add(parts[3].strip())
+    return errors
 
-    if len(errors - prev_errors) > 0:
-        return False, prev_errors, errors
 
-    return True, set(), set()
+def lint_code(repo_playground, temp_name, code, prev_code="") -> tuple[bool, set, set]:
+    """Check that a candidate edit does not introduce new fatal lint errors."""
+    playground = Path(repo_playground) / str(uuid.uuid4())
+    assert not playground.exists(), f"{playground} already exists"
+    playground.mkdir(parents=True)
+
+    temp_path = playground / temp_name
+    try:
+        temp_path.write_text(prev_code, encoding="utf-8")
+        prev_errors = _run_flake8(temp_path)
+
+        temp_path.write_text(code, encoding="utf-8")
+        errors = _run_flake8(temp_path)
+
+        # If flake8 is not installed, at least reject syntax errors instead of
+        # silently treating every candidate as valid.
+        if prev_errors is None or errors is None:
+            try:
+                compile(code, str(temp_path), "exec")
+            except SyntaxError:
+                return False, set(), {"syntax error"}
+            return True, set(), set()
+
+        if len(errors - prev_errors) > 0:
+            return False, prev_errors, errors
+
+        return True, set(), set()
+    finally:
+        shutil.rmtree(playground, ignore_errors=True)
+
+
+def _run_git(args, cwd: Path):
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed in {cwd}: {result.stderr.strip()}"
+        )
+    return result
+
+
+def _init_fake_repo(repo_path: Path):
+    _run_git(["init", "-q"], repo_path)
+    _run_git(["config", "user.email", "agentless@example.com"], repo_path)
+    _run_git(["config", "user.name", "Agentless"], repo_path)
 
 
 def fake_git_repo(repo_playground, file_pathes, old_contents, new_contents) -> str:
@@ -113,196 +143,134 @@ def fake_git_repo(repo_playground, file_pathes, old_contents, new_contents) -> s
         old_contents = [old_contents]
         new_contents = [new_contents]
 
-    # Generate a temperary folder and add uuid to avoid collision
-    repo_playground = os.path.join(repo_playground, str(uuid.uuid4()))
+    playground = Path(repo_playground) / str(uuid.uuid4())
+    assert not playground.exists(), f"{playground} already exists"
+    playground.mkdir(parents=True)
 
-    # assert playground doesn't exist
-    assert not os.path.exists(repo_playground), f"{repo_playground} already exists"
+    try:
+        _init_fake_repo(playground)
 
-    # create playground
-    os.makedirs(repo_playground)
+        for file_path, old_content in zip(file_pathes, old_contents):
+            full_path = playground / file_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(old_content, encoding="utf-8")
 
-    # create a fake git repo
-    subprocess.run(f"cd {repo_playground} && git init", shell=True)
+        _run_git(["add", "--all"], playground)
+        _run_git(["commit", "-m", "initial commit"], playground)
 
-    for file_path, old_content, new_content in zip(
-        file_pathes, old_contents, new_contents
-    ):
-        # create a file
-        subprocess.run(
-            f"mkdir -p {repo_playground}/{os.path.dirname(file_path)}", shell=True
-        )
+        for file_path, new_content in zip(file_pathes, new_contents):
+            full_path = playground / file_path
+            full_path.write_text(new_content, encoding="utf-8")
 
-        with open(f"{repo_playground}/{file_path}", "w") as f:
-            f.write(old_content)
-
-        # add file to git
-        # same message is okay
-        subprocess.run(
-            f"cd {repo_playground} && git add {file_path} && git commit -m 'initial commit'",
-            shell=True,
-        )
-
-    for file_path, old_content, new_content in zip(
-        file_pathes, old_contents, new_contents
-    ):
-        # edit file
-        with open(f"{repo_playground}/{file_path}", "w") as f:
-            f.write(new_content)
-
-    # get git diff
-    o = subprocess.run(
-        f"cd {repo_playground} && git diff .", shell=True, capture_output=True
-    )
-
-    s = o.stdout.decode("utf-8")
-
-    # remove playground
-    subprocess.run(f"rm -rf {repo_playground}", shell=True)
-
-    return s
+        return _run_git(["diff", "--no-color", "--"], playground).stdout
+    finally:
+        shutil.rmtree(playground, ignore_errors=True)
 
 
 def fake_git_apply(repo_playground, file_path, old_content, patch) -> str:
     """create a fake git repo to obtain new file content"""
 
-    # Generate a temperary folder and add uuid to avoid collision
-    repo_playground = os.path.join(repo_playground, str(uuid.uuid4()))
+    playground = Path(repo_playground) / str(uuid.uuid4())
+    assert not playground.exists(), f"{playground} already exists"
+    playground.mkdir(parents=True)
 
-    # assert playground doesn't exist
-    assert not os.path.exists(repo_playground), f"{repo_playground} already exists"
+    try:
+        _init_fake_repo(playground)
 
-    # create playground
-    os.makedirs(repo_playground)
+        full_path = playground / file_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(old_content, encoding="utf-8")
+        _run_git(["add", "--all"], playground)
+        _run_git(["commit", "-m", "initial commit"], playground)
 
-    # create a fake git repo
-    subprocess.run(f"cd {repo_playground} && git init", shell=True)
+        patch_file = f"{uuid.uuid4()}.patch"
+        patch_path = playground / patch_file
+        patch_path.write_text(patch, encoding="utf-8")
 
-    # create a file
-    subprocess.run(
-        f"mkdir -p {repo_playground}/{os.path.dirname(file_path)}", shell=True
-    )
-
-    with open(f"{repo_playground}/{file_path}", "w") as f:
-        f.write(old_content)
-
-    # add file to git
-    subprocess.run(
-        f"cd {repo_playground} && git add {file_path} && git commit -m 'initial commit'",
-        shell=True,
-    )
-
-    # apply patch file
-    patch_file = f"{str(uuid.uuid4())}.patch"
-    with open(f"{repo_playground}/{patch_file}", "w") as f:
-        f.write(patch)
-    o = subprocess.run(
-        f"cd {repo_playground} && git apply --whitespace=nowarn {patch_file}",
-        shell=True,
-        capture_output=True,
-    )
-    if o.stderr.decode("utf-8"):
-        print("stderr> ", o.stderr.decode("utf-8"))
-        # TODO: This rarely happen but the patch should be valid, needs to look into it
-
-        with open(f"{repo_playground}/{file_path}", "w") as f:
-            f.write(old_content + "\n")
-
-        o = subprocess.run(
-            f"cd {repo_playground} && git apply --whitespace=nowarn {patch_file}",
-            shell=True,
+        result = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", patch_file],
+            cwd=str(playground),
             capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
+        if result.returncode != 0:
+            print("stderr> ", result.stderr)
+            # Some model patches omit a final newline; retry once with one.
+            full_path.write_text(old_content + "\n", encoding="utf-8")
+            result = subprocess.run(
+                ["git", "apply", "--whitespace=nowarn", patch_file],
+                cwd=str(playground),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode != 0:
+                print("stderr> ", result.stderr)
+                raise RuntimeError("git apply failed for patch")
 
-        if o.stderr.decode("utf-8"):
-            print("stderr> ", o.stderr.decode("utf-8"))
-            assert False, "shouldn't happen"
-
-    # get git diff
-    o = subprocess.run(
-        f"cd {repo_playground} && cat {file_path}", shell=True, capture_output=True
-    )
-
-    s = o.stdout.decode("utf-8")
-
-    # remove playground
-    subprocess.run(f"rm -rf {repo_playground}", shell=True)
-
-    return s
+        return full_path.read_text(encoding="utf-8")
+    finally:
+        shutil.rmtree(playground, ignore_errors=True)
 
 
 def fake_git_apply_multiple(repo_playground, file_path_contents, patch) -> dict:
     """create a fake git repo to obtain new file contents (multiple)"""
 
-    # Generate a temperary folder and add uuid to avoid collision
-    repo_playground = os.path.join(repo_playground, str(uuid.uuid4()))
+    playground = Path(repo_playground) / str(uuid.uuid4())
+    assert not playground.exists(), f"{playground} already exists"
+    playground.mkdir(parents=True)
 
-    # assert playground doesn't exist
-    assert not os.path.exists(repo_playground), f"{repo_playground} already exists"
+    try:
+        _init_fake_repo(playground)
 
-    # create playground
-    os.makedirs(repo_playground)
-
-    # create a fake git repo
-    subprocess.run(f"cd {repo_playground} && git init", shell=True)
-
-    # create files
-    for file_path, old_content in file_path_contents.items():
-        subprocess.run(
-            f"mkdir -p {repo_playground}/{os.path.dirname(file_path)}", shell=True
-        )
-
-        with open(f"{repo_playground}/{file_path}", "w") as f:
-            f.write(old_content)
-
-        # add file to git
-        subprocess.run(
-            f"cd {repo_playground} && git add {file_path} && git commit -m 'initial commit'",
-            shell=True,
-        )
-
-    # apply patch file
-    patch_file = f"{str(uuid.uuid4())}.patch"
-    with open(f"{repo_playground}/{patch_file}", "w") as f:
-        f.write(patch)
-    o = subprocess.run(
-        f"cd {repo_playground} && git apply --whitespace=nowarn {patch_file}",
-        shell=True,
-        capture_output=True,
-    )
-    if o.stderr.decode("utf-8"):
-        print("stderr> ", o.stderr.decode("utf-8"))
-        # TODO: This rarely happen but the patch should be valid, needs to look into it
         for file_path, old_content in file_path_contents.items():
-            with open(f"{repo_playground}/{file_path}", "w") as f:
-                f.write(old_content + "\n")
+            full_path = playground / file_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(old_content, encoding="utf-8")
 
-        o = subprocess.run(
-            f"cd {repo_playground} && git apply --whitespace=nowarn {patch_file}",
-            shell=True,
+        _run_git(["add", "--all"], playground)
+        _run_git(["commit", "-m", "initial commit"], playground)
+
+        patch_file = f"{uuid.uuid4()}.patch"
+        patch_path = playground / patch_file
+        patch_path.write_text(patch, encoding="utf-8")
+
+        result = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", patch_file],
+            cwd=str(playground),
             capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
+        if result.returncode != 0:
+            print("stderr> ", result.stderr)
+            # Some model patches omit a final newline; retry once with one.
+            for file_path, old_content in file_path_contents.items():
+                (playground / file_path).write_text(
+                    old_content + "\n", encoding="utf-8"
+                )
+            result = subprocess.run(
+                ["git", "apply", "--whitespace=nowarn", patch_file],
+                cwd=str(playground),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode != 0:
+                print("stderr> ", result.stderr)
+                raise RuntimeError("git apply failed for multi-file patch")
 
-        if o.stderr.decode("utf-8"):
-            print("stderr> ", o.stderr.decode("utf-8"))
-            assert False, "shouldn't happen"
-
-    new_file_path_contents = {}
-
-    # get git diff
-    for file_path, old_content in file_path_contents.items():
-        o = subprocess.run(
-            f"cd {repo_playground} && cat {file_path}", shell=True, capture_output=True
-        )
-
-        s = o.stdout.decode("utf-8")
-
-        new_file_path_contents[file_path] = s
-
-    # remove playground
-    subprocess.run(f"rm -rf {repo_playground}", shell=True)
-
-    return new_file_path_contents
+        return {
+            file_path: (playground / file_path).read_text(encoding="utf-8")
+            for file_path in file_path_contents
+        }
+    finally:
+        shutil.rmtree(playground, ignore_errors=True)
 
 
 def get_functions(tree):
@@ -814,6 +782,134 @@ def parse_diff_edit_commands(
     return content
 
 
+def _parse_literal_content(value):
+    """Best-effort literal parser that tolerates raw newlines in model output."""
+    value = value.strip()
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        pass
+    for quote in ('"""', "'''", '"', "'"):
+        if (
+            len(value) >= 2 * len(quote)
+            and value.startswith(quote)
+            and value.endswith(quote)
+        ):
+            inner = value[len(quote) : -len(quote)]
+            # Malformed model output sometimes wraps the desired text in an
+            # extra pair of triple quotes, e.g. ``"""\n"""text"""\n"""``.
+            # Drop the empty quoted fragments and keep the real content.
+            if len(quote) == 3 and quote in inner:
+                fragments = [part.strip("\r\n") for part in inner.split(quote)]
+                fragments = [part for part in fragments if part.strip()]
+                if fragments:
+                    return "\n".join(fragments)
+            return (
+                inner.replace("\\r\\n", "\n")
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\'", "'")
+            )
+    return None
+
+
+def _clean_triple_quoted_content(value):
+    """Strip stray triple-quote wrappers left by malformed model output."""
+    if isinstance(value, str) and '"""' in value:
+        fragments = [part.strip("\r\n") for part in value.split('"""')]
+        fragments = [part for part in fragments if part.strip()]
+        if fragments:
+            return "\n".join(fragments)
+    return value
+
+
+def _parse_edit_file_subcommand(subcommand):
+    """Parse ``edit_file(start, end, content)`` without executing code."""
+    text = subcommand.strip()
+    if text.startswith("edit_file("):
+        text = text[len("edit_file(") :]
+    # ``parse_edit_commands`` splits on ``edit_file(`` and therefore leaves the
+    # closing parenthesis in the subcommand.  Remove it before re-wrapping the
+    # arguments in a function call for the AST parser.
+    if text.endswith(")"):
+        text = text[:-1].rstrip()
+
+    try:
+        call = ast.parse(f"edit_file({text})", mode="eval").body
+    except SyntaxError:
+        call = None
+
+    if (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "edit_file"
+    ):
+        if len(call.args) >= 3 and not call.keywords:
+            try:
+                start = ast.literal_eval(call.args[0])
+                end = ast.literal_eval(call.args[1])
+                content = _clean_triple_quoted_content(ast.literal_eval(call.args[2]))
+                return int(start), int(end), str(content)
+            except (ValueError, SyntaxError, TypeError):
+                pass
+        try:
+            kwargs = {
+                kw.arg: ast.literal_eval(kw.value)
+                for kw in call.keywords
+                if kw.arg is not None
+            }
+        except (ValueError, SyntaxError):
+            kwargs = {}
+        if all(key in kwargs for key in ("start", "end", "content")):
+            return (
+                int(kwargs["start"]),
+                int(kwargs["end"]),
+                str(_clean_triple_quoted_content(kwargs["content"])),
+            )
+
+    # Fallback for imperfectly formatted model output.  Only parse the numeric
+    # arguments and the content string; never call eval().
+    positional = re.match(r"^\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(.+?)\s*$", text, re.S)
+    if positional:
+        content_value = _parse_literal_content(positional.group(3))
+        if content_value is not None:
+            return int(positional.group(1)), int(positional.group(2)), str(content_value)
+        # Some model outputs lose their quotes entirely; accept the bare text
+        # rather than dropping the whole edit command.
+        bare_content = positional.group(3).strip()
+        if bare_content:
+            return int(positional.group(1)), int(positional.group(2)), bare_content
+
+    start_match = re.search(r"\bstart\s*=\s*(-?\d+)", text)
+    end_match = re.search(r"\bend\s*=\s*(-?\d+)", text)
+    content_match = re.search(r"\bcontent\s*=\s*(.*)", text, re.S)
+    if not (start_match and end_match and content_match):
+        return None
+
+    raw_content = content_match.group(1).strip()
+    variants = [raw_content]
+    if raw_content.endswith(")"):
+        variants.append(raw_content[:-1].rstrip())
+    for value in variants:
+        try:
+            return (
+                int(start_match.group(1)),
+                int(end_match.group(1)),
+                str(ast.literal_eval(value)),
+            )
+        except (ValueError, SyntaxError):
+            pass
+
+    # Last-resort handling for triple/single quoted content with a trailing
+    # parenthesis or an unbalanced quote in the model output.
+    for quote in ('"""', "'''", '"', "'"):
+        if raw_content.startswith(quote) and raw_content.endswith(quote):
+            raw_content = raw_content[len(quote) : -len(quote)]
+            break
+    return int(start_match.group(1)), int(end_match.group(1)), raw_content
+
+
 def parse_edit_commands(commands, content):
     content_lines = content.splitlines()
     map_content_lines_to_line_num = [i for i in range(0, len(content_lines) + 1)]
@@ -839,44 +935,28 @@ def parse_edit_commands(commands, content):
     )
 
     for subcommand in unique_sorted_subcommands:
-        command_start = int(subcommand.split(",")[0].split("start=")[-1])
-        command_end = int(subcommand.split(",")[1].split("end=")[-1])
+        parsed = _parse_edit_file_subcommand(subcommand)
+        if parsed is None:
+            continue
+        command_start, command_end, changed_content = parsed
 
+        if command_start not in map_content_lines_to_line_num:
+            continue
+        if command_end not in map_content_lines_to_line_num:
+            continue
         start = map_content_lines_to_line_num.index(command_start)
         end = map_content_lines_to_line_num.index(command_end)
 
-        try:
-            changed_content = eval(
-                ")".join(",".join(subcommand.split(",")[2:]).split(")")[:-1])
+        # small thing to ensure right white space indent
+        if (
+            start == end
+            and len(changed_content.splitlines()) == 1
+            and (len(changed_content) - len(changed_content.lstrip())) == 0
+        ):
+            indent_length = len(content_lines[start - 1]) - len(
+                content_lines[start - 1].lstrip()
             )
-            # small thing to ensure right white space indent
-            if (
-                start == end
-                and len(changed_content.splitlines()) == 1
-                and (len(changed_content) - len(changed_content.lstrip())) == 0
-            ):
-                indent_length = len(content_lines[start - 1]) - len(
-                    content_lines[start - 1].lstrip()
-                )
-                changed_content = " " * indent_length + changed_content.lstrip()
-
-        # catch syntax error
-        except:
-            # try to fix, specially for case where there are """ or ''' in the string, that cannot be
-            # easily evaluated.
-            eval_str = ")".join(
-                ",".join(subcommand.split(",")[2:]).split(")")[:-1]
-            ).strip()
-
-            if eval_str.startswith("content="):
-                eval_str = eval_str[8:]
-
-            if eval_str.startswith('"""') or eval_str.startswith("'''"):
-                eval_str = eval_str[3:-3]
-            if eval_str.startswith('"') or eval_str.startswith("'"):
-                eval_str = eval_str[1:-1]
-
-            changed_content = eval_str
+            changed_content = " " * indent_length + changed_content.lstrip()
 
         content_lines[start - 1 : end] = changed_content.splitlines()
 
@@ -1095,11 +1175,13 @@ function: AlterField.reduce
     ]
     extracted_locs = extract_locs_for_files([raw_output], files)
     print(extracted_locs)
-    assert extracted_locs == [
-        ["function: MigrationOptimizer.optimize_inner"],
-        ["function: AlterField.reduce"],
-        [""],
-    ]
+    assert extracted_locs == {
+        "django/db/migrations/optimizer.py": [
+            "function: MigrationOptimizer.optimize_inner"
+        ],
+        "django/db/migrations/operations/fields.py": ["function: AlterField.reduce"],
+        "django/db/migrations/operations/models.py": [""],
+    }
 
     raw_output = """
 ```python

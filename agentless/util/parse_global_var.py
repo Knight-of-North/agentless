@@ -25,8 +25,8 @@ def parse_global_var_from_code(file_content: str) -> dict[str, dict]:
     """Parse global variables."""
     try:
         tree = cst.parse_module(file_content)
-    except:
-        return file_content
+    except Exception:
+        return {}
 
     wrapper = cst.metadata.MetadataWrapper(tree)
     visitor = GlobalVariableVisitor()

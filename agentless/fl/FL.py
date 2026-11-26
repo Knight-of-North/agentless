@@ -259,7 +259,9 @@ Return just the locations wrapped with ```.
             traj = {
                 "prompt": message,
                 "usage": {
-                    "prompt_tokens": num_tokens_from_messages(message, self.model),
+                    "prompt_tokens": num_tokens_from_messages(
+                        message, self.model_name
+                    ),
                 },
             }
             return [], {"raw_output_loc": ""}, traj

@@ -172,7 +172,9 @@ def get_skeleton(
     except:
         return raw_code
 
-    transformer = CompressTransformer(keep_constant=keep_constant, keep_indent=True)
+    transformer = CompressTransformer(
+        keep_constant=keep_constant, keep_indent=keep_indent
+    )
     modified_tree = tree.visit(transformer)
     code = modified_tree.code
 

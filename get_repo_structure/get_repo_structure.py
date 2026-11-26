@@ -2,6 +2,7 @@ import argparse
 import ast
 import json
 import os
+import shutil
 import subprocess
 import uuid
 
@@ -24,43 +25,56 @@ repo_to_top_folder = {
 }
 
 
+def get_top_folder(repo_name: str) -> str:
+    """Return the local checkout folder for a repository name.
+
+    The original implementation only supported the twelve SWE-bench
+    repositories listed above.  Deriving the last path component keeps the
+    function usable for forks and custom repositories.
+    """
+    return repo_to_top_folder.get(repo_name, repo_name.rstrip("/").split("/")[-1])
+
+
 def checkout_commit(repo_path, commit_id):
     """Checkout the specified commit in the given local git repository.
     :param repo_path: Path to the local git repository
     :param commit_id: Commit ID to checkout
     :return: None
     """
-    try:
-        # Change directory to the provided repository path and checkout the specified commit
-        print(f"Checking out commit {commit_id} in repository at {repo_path}...")
-        subprocess.run(["git", "-C", repo_path, "checkout", commit_id], check=True)
-        print("Commit checked out successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"An error occurred while running git command: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+    print(f"Checking out commit {commit_id} in repository at {repo_path}...")
+    result = subprocess.run(
+        ["git", "-C", repo_path, "checkout", commit_id],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to checkout {commit_id} in {repo_path}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    print("Commit checked out successfully.")
 
 
 def clone_repo(repo_name, repo_playground):
-    try:
-
-        print(
-            f"Cloning repository from https://github.com/{repo_name}.git to {repo_playground}/{repo_to_top_folder[repo_name]}..."
+    destination = os.path.join(repo_playground, get_top_folder(repo_name))
+    print(
+        f"Cloning repository from https://github.com/{repo_name}.git to {destination}..."
+    )
+    result = subprocess.run(
+        ["git", "clone", f"https://github.com/{repo_name}.git", destination],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to clone {repo_name}: {result.stderr.strip() or result.stdout.strip()}"
         )
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                f"https://github.com/{repo_name}.git",
-                f"{repo_playground}/{repo_to_top_folder[repo_name]}",
-            ],
-            check=True,
-        )
-        print("Repository cloned successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"An error occurred while running git command: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+    print("Repository cloned successfully.")
+    return destination
 
 
 def get_project_structure_from_scratch(
@@ -76,20 +90,20 @@ def get_project_structure_from_scratch(
     # create playground
     os.makedirs(repo_playground)
 
-    clone_repo(repo_name, repo_playground)
-    checkout_commit(f"{repo_playground}/{repo_to_top_folder[repo_name]}", commit_id)
-    structure = create_structure(f"{repo_playground}/{repo_to_top_folder[repo_name]}")
-    # clean up
-    subprocess.run(
-        ["rm", "-rf", f"{repo_playground}/{repo_to_top_folder[repo_name]}"], check=True
-    )
-    d = {
-        "repo": repo_name,
-        "base_commit": commit_id,
-        "structure": structure,
-        "instance_id": instance_id,
-    }
-    return d
+    try:
+        repo_path = clone_repo(repo_name, repo_playground)
+        checkout_commit(repo_path, commit_id)
+        structure = create_structure(repo_path)
+        return {
+            "repo": repo_name,
+            "base_commit": commit_id,
+            "structure": structure,
+            "instance_id": instance_id,
+        }
+    finally:
+        # rmtree works on Windows as well as POSIX; the old `rm -rf` command
+        # failed outright on Windows.
+        shutil.rmtree(repo_playground, ignore_errors=True)
 
 
 def parse_python_file(file_path, file_content=None):
@@ -99,7 +113,7 @@ def parse_python_file(file_path, file_content=None):
     """
     if file_content is None:
         try:
-            with open(file_path, "r") as file:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as file:
                 file_content = file.read()
                 parsed_data = ast.parse(file_content)
         except Exception as e:  # Catch all types of exceptions
@@ -120,7 +134,7 @@ def parse_python_file(file_path, file_content=None):
         if isinstance(node, ast.ClassDef):
             methods = []
             for n in node.body:
-                if isinstance(n, ast.FunctionDef):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     methods.append(
                         {
                             "name": n.name,
@@ -143,9 +157,7 @@ def parse_python_file(file_path, file_content=None):
                     "methods": methods,
                 }
             )
-        elif isinstance(node, ast.FunctionDef) and not isinstance(
-            node, ast.AsyncFunctionDef
-        ):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name not in class_methods:
                 function_names.append(
                     {
@@ -167,9 +179,23 @@ def create_structure(directory_path):
     :return: A dictionary representing the structure.
     """
     structure = {}
+    repo_name = os.path.basename(directory_path)
+    skip_dirs = {
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "venv",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        ".mypy_cache",
+        ".pytest_cache",
+    }
 
-    for root, _, files in os.walk(directory_path):
-        repo_name = os.path.basename(directory_path)
+    for root, dirs, files in os.walk(directory_path):
+        dirs[:] = [directory for directory in dirs if directory not in skip_dirs]
         relative_root = os.path.relpath(root, directory_path)
         if relative_root == ".":
             relative_root = repo_name

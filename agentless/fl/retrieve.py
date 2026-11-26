@@ -18,16 +18,6 @@ from agentless.util.utils import load_json, load_jsonl, setup_logger
 
 def retrieve_locs(bug, args, swe_bench_data, found_files, prev_o, write_lock=None):
 
-    found = False
-    for o in prev_o:
-        if o["instance_id"] == bug["instance_id"]:
-            found = True
-            break
-
-    if found:
-        logger.info(f"skipping {bug['instance_id']} since patch already generated")
-        return None
-
     instance_id = bug["instance_id"]
 
     if args.target_id is not None:
@@ -37,6 +27,16 @@ def retrieve_locs(bug, args, swe_bench_data, found_files, prev_o, write_lock=Non
     log_file = os.path.join(args.output_folder, "retrieval_logs", f"{instance_id}.log")
     logger = setup_logger(log_file)
     logger.info(f"Processing bug {instance_id}")
+
+    found = False
+    for o in prev_o:
+        if o["instance_id"] == instance_id:
+            found = True
+            break
+
+    if found:
+        logger.info(f"skipping {instance_id} since patch already generated")
+        return None
 
     bench_data = [x for x in swe_bench_data if x["instance_id"] == instance_id][0]
     problem_statement = bench_data["problem_statement"]
@@ -75,20 +75,22 @@ def retrieve_locs(bug, args, swe_bench_data, found_files, prev_o, write_lock=Non
 
     if write_lock is not None:
         write_lock.acquire()
-    with open(args.output_file, "a") as f:
-        f.write(
-            json.dumps(
-                {
-                    "instance_id": instance_id,
-                    "found_files": file_names,
-                    "node_info": meta_infos,
-                    "traj": traj,
-                }
+    try:
+        with open(args.output_file, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "instance_id": instance_id,
+                        "found_files": file_names,
+                        "node_info": meta_infos,
+                        "traj": traj,
+                    }
+                )
+                + "\n"
             )
-            + "\n"
-        )
-    if write_lock is not None:
-        write_lock.release()
+    finally:
+        if write_lock is not None:
+            write_lock.release()
 
 
 def retrieve(args):
@@ -122,12 +124,17 @@ def retrieve(args):
                 )
                 for bug in swe_bench_data
             ]
-            for _ in tqdm(
+            for future in tqdm(
                 concurrent.futures.as_completed(futures),
                 total=len(swe_bench_data),
                 colour="MAGENTA",
             ):
-                pass
+                try:
+                    future.result()
+                except Exception:
+                    setup_logger(
+                        os.path.join(args.output_folder, "retrieval_logs", "errors.log")
+                    ).exception("retrieval worker failed")
 
 
 def main():
@@ -172,7 +179,7 @@ def main():
     os.makedirs(os.path.join(args.output_folder, "retrieval_logs"), exist_ok=True)
 
     # dump argument
-    with open(os.path.join(args.output_folder, "args.json"), "w") as f:
+    with open(os.path.join(args.output_folder, "args.json"), "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=4)
 
     retrieve(args)

@@ -71,28 +71,19 @@ class OpenAIChatDecoder(DecoderBase):
             completion_tokens = 0
             prompt_tokens = 0
 
-        # The nice thing is, when we generate multiple samples from the same input (message),
-        # the input tokens are only charged once according to openai API.
-        # Therefore, we assume the request cost is only counted for the first sample.
-        # More specifically, the `prompt_tokens` is for one input message,
-        # and the `completion_tokens` is the sum of all returned completions.
-        # Therefore, for the second and later samples, the cost is zero.
-        trajs = [
-            {
-                "response": responses[0],
-                "usage": {
-                    "completion_tokens": completion_tokens,
-                    "prompt_tokens": prompt_tokens,
-                },
-            }
-        ]
-        for response in responses[1:]:
+        # The prompt is charged once per request; assigning it to the first
+        # sample keeps the aggregate cost correct without double counting.
+        trajs = []
+        response_count = len(responses) or 1
+        base_completion, extra_completion = divmod(completion_tokens, response_count)
+        for index, response in enumerate(responses):
             trajs.append(
                 {
                     "response": response,
                     "usage": {
-                        "completion_tokens": 0,
-                        "prompt_tokens": 0,
+                        "completion_tokens": base_completion
+                        + (1 if index < extra_completion else 0),
+                        "prompt_tokens": prompt_tokens if index == 0 else 0,
                     },
                 }
             )

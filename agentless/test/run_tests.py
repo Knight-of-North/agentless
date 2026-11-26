@@ -2,10 +2,14 @@ import json
 import os
 import platform
 import re
-import resource
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+
+try:
+    import resource
+except ImportError:  # Windows does not provide the Unix resource module.
+    resource = None
 
 import docker
 from swebench.harness.constants import (
@@ -27,6 +31,11 @@ from swebench.harness.utils import get_test_directives
 from tqdm import tqdm
 
 OPEN_FILE_LIMIT = 4096
+
+
+def raise_open_file_limit():
+    if resource is not None:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (OPEN_FILE_LIMIT, OPEN_FILE_LIMIT))
 
 NOOP_PATCH = """diff --git a/this_is_invisible.py b/this_is_invisible.py
 new file mode 100644
@@ -80,10 +89,14 @@ def txt_file_contains_string(path_to_txt, expected_output, other_patterns=[]):
 
 def create_instance_test_dict(jsonl_file_path):
     instance_test_dict = {}
+    if not jsonl_file_path:
+        return instance_test_dict
 
-    with open(jsonl_file_path, "r") as file:
+    with open(jsonl_file_path, "r", encoding="utf-8") as file:
         for line in file:
-            json_obj = json.loads(line.strip())
+            if not line.strip():
+                continue
+            json_obj = json.loads(line)
             instance_id = json_obj["instance_id"]
             test_patch = json_obj["test_patch"]
             instance_test_dict[instance_id] = test_patch
@@ -345,7 +358,7 @@ def run_reproduction_tests(
     assert len(instance_ids) == len(
         model_patches
     ), "There must be the same number of instance_ids as model patches"
-    resource.setrlimit(resource.RLIMIT_NOFILE, (OPEN_FILE_LIMIT, OPEN_FILE_LIMIT))
+    raise_open_file_limit()
 
     instance_to_reproduction_code = create_instance_test_dict(test_jsonl)
 
@@ -450,14 +463,22 @@ def run_reproduction_tests(
                     client,
                     run_id,
                     timeout,
-                ): None
+                ): test_spec.instance_id
                 for test_spec in test_specs
                 if test_spec.instance_id in ids
             }
             # Wait for each future to complete
             for future in as_completed(futures):
                 pbar.update(1)
-                result = future.result()
+                instance_id = futures[future]
+                try:
+                    result = future.result()
+                except Exception:
+                    traceback.print_exc()
+                    results[instance_id] = False
+                    resolved_dict[instance_id] = False
+                    continue
+
                 if result:
                     instance_id = result[0]
                     resolved = result[1][instance_id]["resolved"]
@@ -474,14 +495,6 @@ def run_reproduction_tests(
                         path_to_log, expected_output, other_patterns=other_patterns
                     )
                     results[instance_id] = passes_tests
-                try:
-                    # Update progress bar, check if instance ran successfully
-                    future.result()
-                except Exception as e:
-                    traceback.print_exc()
-                    results[instance_id] = False
-                    resolved_dict[instance_id] = False
-                    continue
 
     print("All instances run.")
     return results
@@ -501,7 +514,7 @@ def run_tests(
     assert len(instance_ids) == len(
         model_patches
     ), "There must be the same number of instance_ids as model patches"
-    resource.setrlimit(resource.RLIMIT_NOFILE, (OPEN_FILE_LIMIT, OPEN_FILE_LIMIT))
+    raise_open_file_limit()
 
     print(f"Using run_id: {run_id}")
 
@@ -605,26 +618,26 @@ def run_tests(
                     client,
                     run_id,
                     timeout,
-                ): None
+                ): test_spec.instance_id
                 for test_spec in test_specs
                 if test_spec.instance_id in ids
             }
             # Wait for each future to complete
             for future in as_completed(futures):
                 pbar.update(1)
-                result = future.result()
-                if result:
-                    instance_id = result[0]
-                    resolved = result[1][instance_id]["resolved"]
-                    resolved_dict[instance_id] = resolved
+                instance_id = futures[future]
                 try:
-                    # Update progress bar, check if instance ran successfully
-                    future.result()
-                except Exception as e:
+                    result = future.result()
+                except Exception:
                     traceback.print_exc()
                     results[instance_id] = False  # Or handle the error case as needed
                     resolved_dict[instance_id] = False
                     continue
+
+                if result:
+                    instance_id = result[0]
+                    resolved = result[1][instance_id]["resolved"]
+                    resolved_dict[instance_id] = resolved
 
     print("All instances run.")
     return resolved_dict
